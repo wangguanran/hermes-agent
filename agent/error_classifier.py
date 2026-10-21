@@ -1140,6 +1140,35 @@ def _oversized_message_content_rejection(body: Any) -> bool:
     return False
 
 
+def _responses_input_union_validation(c: "_Ctx") -> bool:
+    """True for a strict-Responses request-shape rejection naming the ``body.input`` union.
+
+    Custom gateways proxying thinking endpoints answer a malformed replay item with a pydantic
+    validation list (``loc: body.input`` / ``body.input.reasoning.content.type``) whose generic
+    "Input should be a valid string" wording #104731's multimodal keyword rule claims — spending the
+    retry stripping tool images that were never there. Stripping cannot fix a request-shape bug and
+    re-sending the same item only fails again, so these must abort as ``format_error``.
+    Tool-scoped locs (``messages.N.tool.content.str``) stay with #104731.
+    """
+    body = c.body if isinstance(c.body, dict) else {}
+    inner = body.get("error") if isinstance(body.get("error"), dict) else body
+    param = str((inner or {}).get("param") or "").lower()
+    if param.startswith("body.input"):
+        return True
+    msg = c.msg or ""
+    if "body.input" in msg and ("validation error" in msg or "input should be" in msg):
+        return True
+    details = (inner or {}).get("detail") if isinstance(inner, dict) else None
+    details = details if isinstance(details, list) else body.get("detail") if isinstance(body, dict) else None
+    for detail in details if isinstance(details, list) else ():
+        loc = detail.get("loc") if isinstance(detail, dict) else None
+        if isinstance(loc, list) and len(loc) >= 2:
+            parts = [str(x).lower() for x in loc]
+            if parts[:2] == ["body", "input"]:
+                return True
+    return False
+
+
 def _classify_400(c: _Ctx) -> Verdict:
     """400 Bad Request — image/tool shapes, request-shape rejections, overflow, or generic."""
     msg, code = c.msg, c.code
@@ -1147,6 +1176,10 @@ def _classify_400(c: _Ctx) -> Verdict:
     # multimodal rule, which would otherwise claim "input should be a valid string".
     if _oversized_message_content_rejection(c.body):
         return _V_IMAGE_TOO_LARGE
+    # Responses input-union validation shares that wording but is a request-shape bug: no
+    # retry can help, so it must be classified before the multimodal keyword rule (#104731).
+    if _responses_input_union_validation(c):
+        return _V_FORMAT_ERROR
     verdict = _first_match(msg, _IMAGE_TOOL_RULES)
     if verdict is not None:
         return verdict

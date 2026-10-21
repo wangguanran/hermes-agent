@@ -482,9 +482,11 @@ def drop_shadowed_checkpoints(
 def _prune_stale_reasoning_replay(messages: list[dict[str, Any]]) -> int:
     """Drop shadowed ``type: "compaction"`` checkpoints from assistant turns older than the active one; only the
     NEWEST survives (``drop_shadowed_checkpoints``): a shadowed one was still copied into the compacted transcript
-    and every child session built from it (#102374). Per-turn ``codex_reasoning_items`` are never pruned: the
-    compacted list becomes canonical history, the wire builder already filters per issuer/model, and a later
-    switch to a route that reads earlier-turn reasoning needs them. In place; returns pruned message count."""
+    and every child session built from it (#102374). Turns older than the active one also keep only reasoning a
+    fresh request can replay verbatim — an encrypted-only blob was issued for another route/model, reaches the
+    wire as nothing usable, and makes the next tools request fail (HTTP 400 "reasoning_text … must be passed
+    back", 2026-10-21). Plaintext carriers survive: they are losslessly re-emittable on any wire, which is why
+    the active turn keeps its items untouched. In place; returns pruned message count."""
     # Active turn = everything after the last real user message; synthetic
     # continuation rows and tool results never mark a turn boundary.
     last_user_idx = _last_index_with_role(messages, "user")
@@ -493,6 +495,25 @@ def _prune_stale_reasoning_replay(messages: list[dict[str, Any]]) -> int:
     pruned = set()
     for key in _STALE_REPLAY_PRUNE_KEYS:
         pruned.update(drop_shadowed_checkpoints(messages, key, before=last_user_idx))
+    from agent.responses_plaintext_reasoning import reasoning_content
+
+    for key in _STALE_REPLAY_PRUNE_KEYS:
+        for i in range(max(last_user_idx, 0)):
+            msg = messages[i]
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            items = msg.get(key)
+            if not isinstance(items, list):
+                continue
+            kept = [
+                item for item in items
+                if not (isinstance(item, dict) and item.get("type") == "reasoning"
+                        and not reasoning_content(item)
+                        and not (item.get("_issuer_kind") or item.get("_issuer_model")))
+            ]
+            if len(kept) != len(items):
+                _set_sidecar(msg, key, kept)
+                pruned.add(i)
     return len(pruned)
 
 

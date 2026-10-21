@@ -468,15 +468,17 @@ def _replay_reasoning_items(
     msg: dict[str, Any], *, seen_item_ids: set, current_issuer_kind: Optional[str],
     current_issuer_model: Optional[str] = None, native_compaction_eligible: bool,
 ) -> list[dict[str, Any]]:
-    """Replay persisted encrypted reasoning/compaction items for one assistant turn. Skips duplicate
+    """Replay persisted reasoning/compaction items for one assistant turn. Skips duplicate
     ids, ``compaction`` checkpoints unless THIS request carries ``context_management`` (else a persisted
     checkpoint erases pre-checkpoint history on a model that cannot decrypt it), and items stamped by
     another issuer or model (HTTP 400). Items without a model stamp (legacy or unstamped) replay on a
     matching issuer. ``id`` (store=False lookups 404) and the Hermes provenance fields are stripped."""
+    from agent.responses_plaintext_reasoning import reasoning_content
+
     global _CROSS_ISSUER_WARN_EMITTED
     replayed: list[dict[str, Any]] = []
     for ri in _as_list(msg.get("codex_reasoning_items")):
-        if not (isinstance(ri, dict) and ri.get("encrypted_content")):
+        if not (isinstance(ri, dict) and (ri.get("encrypted_content") or reasoning_content(ri))):
             continue
         item_id = ri.get("id")
         if (item_id and item_id in seen_item_ids) or (ri.get("type") == "compaction" and not native_compaction_eligible):
@@ -612,6 +614,7 @@ def _chat_messages_to_responses_input(
     messages: list[dict[str, Any]], *, is_xai_responses: bool = False, is_github_responses: bool = False,
     replay_encrypted_reasoning: bool = True, current_issuer_kind: Optional[str] = None,
     current_issuer_model: Optional[str] = None, native_compaction_eligible: bool = False,
+    reasoning_content_echo: bool = False,
 ) -> list[dict[str, Any]]:
     """Convert internal chat-style messages to Responses input items.
 
@@ -692,6 +695,10 @@ def _chat_messages_to_responses_input(
             msg, seen_item_ids=seen_item_ids, current_issuer_kind=current_issuer_kind,
             current_issuer_model=current_issuer_model, native_compaction_eligible=native_compaction_eligible,
         )
+        if reasoning_content_echo:
+            from agent.responses_plaintext_reasoning import apply_legacy_echo
+
+            reasoning_items = apply_legacy_echo(msg, reasoning_items)
         emit(reasoning_items, msg)
         message_items = _replay_message_items(
             msg, is_github_responses=is_github_responses, current_issuer_kind=current_issuer_kind,
@@ -860,8 +867,11 @@ def _preflight_function_call_output(item: dict[str, Any], idx: int, ctx: _Prefli
 
 def _preflight_encrypted(item: dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[dict[str, Any]]:
     """``reasoning`` / ``compaction`` items: opaque, issuer-sealed; forward only API-defined fields."""
+    from agent.responses_plaintext_reasoning import reasoning_content
+
     encrypted = item.get("encrypted_content")
-    if not _nonempty_str(encrypted):
+    content = reasoning_content(item) if item["type"] == "reasoning" else []
+    if not _nonempty_str(encrypted) and not content:
         return None
     if item["type"] == "compaction":
         return {"type": "compaction", "encrypted_content": encrypted}
@@ -873,7 +883,9 @@ def _preflight_encrypted(item: dict[str, Any], idx: int, ctx: _PreflightCtx) -> 
         ctx.seen_ids.add(item_id)
     summary = _as_list(item.get("summary"))
     return {
-        "type": "reasoning", "encrypted_content": encrypted,
+        "type": "reasoning",
+        **({"encrypted_content": encrypted} if _nonempty_str(encrypted) else {}),
+        **({"content": content} if content else {}),
         "summary": _neutralize_harmony_structure(summary) if ctx.sanitize_harmony_tokens else summary,
     }
 
@@ -1100,7 +1112,12 @@ def _extract_responses_message_text(item: Any) -> str:
 
 
 def _extract_responses_reasoning_text(item: Any) -> str:
-    """Compact reasoning text from a Responses reasoning item (summary, else ``text``)."""
+    """Readable reasoning from complete content, falling back to summary or text."""
+    from agent.responses_plaintext_reasoning import reasoning_content
+
+    content = reasoning_content(item)
+    if content:
+        return "".join(part["text"] for part in content).strip()
     chunks = _text_chunks(getattr(item, "summary", None))
     text = getattr(item, "text", None)
     return "\n".join(chunks).strip() if chunks else (text.strip() if isinstance(text, str) else "")
@@ -1138,12 +1155,21 @@ def _response_tool_call(item: Any, item_type: str, index: int) -> SimpleNamespac
 def _capture_encrypted_item(
     item: Any, item_type: str, issuer_kind: Optional[str], issuer_model: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
-    """``{type, encrypted_content[, _issuer_kind, _issuer_model]}`` for replay, or None without a blob. Reasoning
-    items also carry ``id`` + ``summary`` (required by the API on replay); transient ``rs_tmp_`` skip."""
+    """Capture native encrypted or plaintext reasoning for lossless replay.
+
+    Transient encrypted ids are unusable; their complete plaintext remains replayable.
+    """
+    from agent.responses_plaintext_reasoning import reasoning_content
+
     encrypted = getattr(item, "encrypted_content", None)
-    if not _nonempty_str(encrypted):
+    content = reasoning_content(item) if item_type == "reasoning" else []
+    if not _nonempty_str(encrypted) and not content:
         return None
-    raw_item: dict[str, Any] = {"type": item_type, "encrypted_content": encrypted}
+    raw_item: dict[str, Any] = {"type": item_type}
+    if _nonempty_str(encrypted):
+        raw_item["encrypted_content"] = encrypted
+    if content:
+        raw_item["content"] = content
     if issuer_kind:
         raw_item["_issuer_kind"] = issuer_kind
     if issuer_model:
@@ -1153,7 +1179,10 @@ def _capture_encrypted_item(
     item_id = getattr(item, "id", None)
     if isinstance(item_id, str) and item_id.startswith("rs_tmp_"):
         logger.debug("Skipping transient Codex reasoning item during normalization: %s", item_id)
-        return None
+        if not content:
+            return None
+        raw_item.pop("encrypted_content", None)
+        item_id = None
     if _nonempty_str(item_id):
         raw_item["id"] = item_id
     summary = getattr(item, "summary", None)

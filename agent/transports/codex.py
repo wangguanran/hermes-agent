@@ -692,6 +692,7 @@ class ResponsesApiTransport(ProviderTransport):
             replay_encrypted_reasoning=bool(kwargs.get("replay_encrypted_reasoning", True)),
             current_issuer_kind=self._resolve_issuer_kind(kwargs),
             current_issuer_model=self._last_issuer_model,
+            reasoning_content_echo=bool(kwargs.get("reasoning_content_echo", False)),
             native_compaction_eligible=_native_compaction_active(kwargs.get("context_management")),
         )
 
@@ -768,6 +769,7 @@ class ResponsesApiTransport(ProviderTransport):
                 payload_messages, is_xai_responses=is_xai_responses, is_github_responses=is_github_responses,
                 replay_encrypted_reasoning=replay_encrypted_reasoning, base_url=params.get("base_url"),
                 is_codex_backend=is_codex_backend, context_management=context_management, model=wire_model,
+                reasoning_content_echo=bool(params.get("reasoning_content_echo", False)),
             ),
             "store": False,
         }

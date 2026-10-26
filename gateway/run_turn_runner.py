@@ -141,8 +141,17 @@ class TurnRunner:
             ctx.log_queue.put(f"{ts}  {tool_name}:{preview_str}".rstrip())
         if not ctx.progress_queue or not ctx._run_still_current():
             return
-        if event_type == "tool.completed" and not ctx.long_tool_hint_fired[0]:
-            self._progress_onboarding_hint(kwargs)
+        if event_type == "tool.completed":
+            if not ctx.long_tool_hint_fired[0]:
+                self._progress_onboarding_hint(kwargs)
+            if (
+                tool_name == "terminal"
+                and ctx.tool_progress_enabled
+                and ctx.progress_mode == "verbose"
+                and not ctx._native_slack_task_cards
+                and not self._agent_interrupted()
+            ):
+                self._progress_terminal_result(kwargs)
             return
         # "_thinking" is assistant scratch text between tool calls, never ordinary tool progress:
         # only relayed when the platform explicitly opted into thinking_progress.
@@ -178,6 +187,78 @@ class TurnRunner:
         msg = self._progress_build_message(tool_name, preview, args)
         if msg is not None:
             self._progress_emit(msg)
+
+    def _progress_terminal_result(self, kwargs: dict) -> None:
+        """Deliver terminal output after the verbose ``tool.started`` command block.
+
+        The command is already emitted with ``tool.started``; repeating it here makes
+        every command appear twice. Keep the completion block to its result and status.
+        """
+        raw_result = kwargs.get("result")
+        if isinstance(raw_result, str):
+            try:
+                result = json.loads(raw_result)
+            except (TypeError, ValueError):
+                result = {"output": raw_result}
+        else:
+            result = raw_result
+        if not isinstance(result, dict):
+            if result is None:
+                return
+            result = {"output": str(result)}
+
+        def _text(value) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return value
+            return json.dumps(value, ensure_ascii=False, default=str)
+
+        output = _text(result.get("output"))
+        error = _text(result.get("error"))
+        if error and error not in output:
+            output = f"{output.rstrip()}\n\nError: {error}" if output else error
+        exit_code = result.get("exit_code")
+        is_error = bool(kwargs.get("is_error"))
+        if not output and exit_code is None and not is_error:
+            return
+        if not output:
+            output = "[no stdout/stderr]"
+
+        extra = []
+        for key in ("truncation_note", "full_output_path", "exit_code_meaning", "hint"):
+            value = _text(result.get(key))
+            if value:
+                extra.append(value)
+
+        try:
+            from agent.redact import redact_for_egress
+            from agent.display import fence_safe
+            safe_output = redact_for_egress(output)
+            safe_extra = [redact_for_egress(value) for value in extra]
+        except Exception:
+            # Fail closed: a failed redaction/import must never publish raw tool output.
+            safe_output = "[redaction-unavailable]"
+            safe_extra = []
+            from agent.display import fence_safe
+
+        chunk_size = 2800
+        chunks = [safe_output[i:i + chunk_size] for i in range(0, len(safe_output), chunk_size)] or [""]
+        call_id = _text(kwargs.get("tool_call_id"))
+        status = f"exit code: {exit_code}" if exit_code is not None else "command finished"
+        if is_error:
+            status += " · tool error"
+
+        for index, chunk in enumerate(chunks):
+            part = f" · part {index + 1}/{len(chunks)}" if len(chunks) > 1 else ""
+            identity = f" · {call_id}" if call_id else ""
+            message = f"📤 Terminal result ({status}{identity}{part})"
+            message += f"\nOutput (stdout/stderr):\n```text\n{fence_safe(chunk or '[no stdout/stderr]')}\n```"
+            if index == len(chunks) - 1 and safe_extra:
+                message += "\n" + "\n".join(safe_extra)
+            # Do not use _progress_emit here: its identical-line dedup would collapse distinct,
+            # repeated commands, while verbose mode promises one result per completed call.
+            self._ctx.progress_queue.put(message)
 
     def _progress_subagent_notice(self, preview, kwargs: dict) -> None:
         """Only terminal failure statuses render (same notice rail as credit warnings)."""
@@ -250,7 +331,8 @@ class TurnRunner:
             and isinstance(args.get("command"), str) and args["command"].strip()
         ):
             return None, None
-        cmd_full = args["command"].rstrip()
+        from agent.display import wrap_shell_commands
+        cmd_full = wrap_shell_commands(args["command"].rstrip())
         header = "" if self._ctx.last_was_terminal_block[0] else t("gateway.progress.tool_head", emoji=emoji, tool=tool_name) + "\n"
         cap = self._preview_cap()
         lines = cmd_full.splitlines()
@@ -278,12 +360,17 @@ class TurnRunner:
             if code is None and args:
                 from agent.display import get_tool_preview_max_len
                 pl = get_tool_preview_max_len()
-                args_str = json.dumps(args, ensure_ascii=False, default=str)
+                args_str = json.dumps(args, ensure_ascii=False, default=str, indent=2)
                 # tool_preview_length 0 (default) = no truncation in verbose mode; the user asked
                 # for full detail and platform message-length limits handle the rest.
                 if pl > 0 and len(args_str) > pl:
                     args_str = args_str[:pl - 3] + "..."
-                code = t("gateway.progress.tool_verbose", emoji=emoji, tool=tool_name, keys=list(args.keys()), args=args_str)
+                # 2026-10-24 主人要求：非 terminal 工具的 verbose 参数按 json 代码段上报。
+                # 标题行沿用 tool_verbose 模板（args 传空只取首行），正文包 ```json 围栏。
+                from agent.display import fence_safe
+                head = t("gateway.progress.tool_verbose", emoji=emoji, tool=tool_name,
+                         keys=list(args.keys()), args="").rstrip()
+                code = f"{head}\n```json\n{fence_safe(args_str)}\n```"
             elif code is None:
                 code = (t("gateway.progress.tool_preview", emoji=emoji, tool=tool_name, preview=preview) if preview
                         else t("gateway.progress.tool_pending", emoji=emoji, tool=tool_name))

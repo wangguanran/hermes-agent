@@ -2117,10 +2117,13 @@ class BasePlatformAdapter(ABC):
         emoji, tool = get_tool_emoji(event.tool_name, default='⚙️'), event.tool_name
         if mode == "verbose" and event.args:
             import json
-            args_str = json.dumps(event.args, ensure_ascii=False, default=str)
+            from agent.display import fence_safe
+            args_str = json.dumps(event.args, ensure_ascii=False, default=str, indent=2)
             if preview_max_len > 0 and len(args_str) > preview_max_len:
                 args_str = args_str[:preview_max_len - 3] + "..."
-            return t("gateway.progress.tool_verbose", emoji=emoji, tool=tool, keys=list(event.args.keys()), args=args_str)
+            head = t("gateway.progress.tool_verbose", emoji=emoji, tool=tool,
+                     keys=list(event.args.keys()), args="").rstrip()
+            return f"{head}\n```json\n{fence_safe(args_str)}\n```"
         if not event.preview:
             return t("gateway.progress.tool_pending", emoji=emoji, tool=tool)
         if mode == "verbose":

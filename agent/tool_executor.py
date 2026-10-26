@@ -1163,9 +1163,17 @@ def _commit_tool_result(
     if not blocked:
         # ``tool.completed`` projects AFTER the canonical append + flush so resume can
         # reconstruct the result even if the UI bridge dies mid-projection.
+        progress_args = None
+        if function_name == "terminal":
+            try:
+                progress_args = _redact_tool_args_for_display(function_name, function_args) or {}
+            except Exception as callback_error:
+                logging.debug("Terminal progress args redaction failed", exc_info=callback_error)
+                progress_args = {}
         _safe_callback(
             agent.tool_progress_callback, "Tool progress",
-            "tool.completed", function_name, None, None, duration=tool_duration, is_error=is_error, result=function_result,
+            "tool.completed", function_name, None, progress_args,
+            duration=tool_duration, is_error=is_error, result=function_result,
         )
     if isinstance(function_result, str) and len(function_result) >= _LARGE_TOOL_RESULT_TRIM_CHARS:
         agent._trim_after_tool_batch = True

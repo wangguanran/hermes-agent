@@ -3,6 +3,8 @@
 - 上游：`git@github.com:NousResearch/hermes-agent.git`
 - 基线提交：`b167f21d82`（安装器形态：detached checkout，本机 `~/.hermes/hermes-agent`）
 - 记录分支：`local/customizations-20261026`
+- fork（本机客制化记录仓）：`git@github.com:wangguanran/hermes-agent.git`，本地 remote 名 `fork`
+- 同步命令：`git -C ~/.hermes/hermes-agent push fork local/customizations-20261026`
 - 记录日期：2026-10-26
 
 本文件与同分支提交一起，记录本机 Hermes 相对上游的**全部客制化**。仓库内改动直接体现为提交内容；仓库外改动（插件、脚本、技能、配置）因不在本仓库，复制或指向见下。

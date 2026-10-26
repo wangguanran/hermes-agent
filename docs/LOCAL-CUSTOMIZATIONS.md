@@ -55,5 +55,6 @@
 2. 插件：`python3 ~/.hermes/local-fork/restore-cursor-provider.py --check`，drift 则执行同步。
 3. 脚本与技能在 `~/.hermes/` 下，不随上游升级覆盖。
 4. 配置项按 §2.4 回读核对。
+5. **提交前注意**：本仓库 pre-commit 走 lefthook + `ruff`（`lefthook.yml` 的 lint python）。`ruff` 不在 PATH 时提交会直接失败（`exit status 127`）。本机装法：`uv tool install ruff`（隔离在 `~/.local/bin`，不动 Hermes venv）。
 
 _Author: Hermes Agent_

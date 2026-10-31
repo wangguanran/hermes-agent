@@ -1144,6 +1144,13 @@ class AIAgent(
 
         if has_compaction_checkpoint(msg.get("codex_reasoning_items")):
             return False
+        if not drop_codex_reasoning_items:
+            from agent.codex_responses_adapter import _plaintext_reasoning_content
+
+            if any(isinstance(item, dict) and item.get("type") == "reasoning"
+                   and (item.get("encrypted_content") or _plaintext_reasoning_content(item))
+                   for item in (msg.get("codex_reasoning_items") or [])):
+                return False
         reasoning = msg.get("reasoning_content") or msg.get("reasoning")
         rd = msg.get("reasoning_details")
         if (isinstance(reasoning, str) and reasoning.strip()) or (isinstance(rd, list) and rd):

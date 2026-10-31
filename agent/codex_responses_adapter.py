@@ -464,11 +464,18 @@ def _assistant_message_item(
     )
 
 
+def _plaintext_reasoning_content(item: Any) -> list[dict[str, str]]:
+    """Retain exact relay reasoning text, which is required on later tool requests."""
+    parts = _as_list(_field(item, "content"))
+    return [{"type": "reasoning_text", "text": _field(part, "text")} for part in parts
+            if _field(part, "type") == "reasoning_text" and _nonempty_str(_field(part, "text"))]
+
+
 def _replay_reasoning_items(
     msg: dict[str, Any], *, seen_item_ids: set, current_issuer_kind: Optional[str],
     current_issuer_model: Optional[str] = None, native_compaction_eligible: bool,
 ) -> list[dict[str, Any]]:
-    """Replay persisted encrypted reasoning/compaction items for one assistant turn. Skips duplicate
+    """Replay persisted plaintext/encrypted reasoning and compaction items for one assistant turn. Skips duplicate
     ids, ``compaction`` checkpoints unless THIS request carries ``context_management`` (else a persisted
     checkpoint erases pre-checkpoint history on a model that cannot decrypt it), and items stamped by
     another issuer or model (HTTP 400). Items without a model stamp (legacy or unstamped) replay on a
@@ -476,7 +483,7 @@ def _replay_reasoning_items(
     global _CROSS_ISSUER_WARN_EMITTED
     replayed: list[dict[str, Any]] = []
     for ri in _as_list(msg.get("codex_reasoning_items")):
-        if not (isinstance(ri, dict) and ri.get("encrypted_content")):
+        if not (isinstance(ri, dict) and (ri.get("encrypted_content") or _plaintext_reasoning_content(ri))):
             continue
         item_id = ri.get("id")
         if (item_id and item_id in seen_item_ids) or (ri.get("type") == "compaction" and not native_compaction_eligible):
@@ -692,6 +699,17 @@ def _chat_messages_to_responses_input(
             msg, seen_item_ids=seen_item_ids, current_issuer_kind=current_issuer_kind,
             current_issuer_model=current_issuer_model, native_compaction_eligible=native_compaction_eligible,
         )
+        # Legacy tool turns may have lost their native reasoning before this fix.
+        # Use existing text, or the provider's accepted missing-reasoning pad, only
+        # on model families that require echo-back. Never replace native items.
+        if replay_encrypted_reasoning and not reasoning_items and not msg.get("codex_reasoning_items") and msg.get("tool_calls"):
+            from agent.message_sanitization import needs_reasoning_echo
+
+            if needs_reasoning_echo("", current_issuer_model, None):
+                text = msg.get("reasoning_content") or msg.get("reasoning") or " "
+                if isinstance(text, str):
+                    reasoning_items = [{"type": "reasoning", "summary": [],
+                                        "content": [{"type": "reasoning_text", "text": text}]}]
         emit(reasoning_items, msg)
         message_items = _replay_message_items(
             msg, is_github_responses=is_github_responses, current_issuer_kind=current_issuer_kind,
@@ -861,7 +879,8 @@ def _preflight_function_call_output(item: dict[str, Any], idx: int, ctx: _Prefli
 def _preflight_encrypted(item: dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[dict[str, Any]]:
     """``reasoning`` / ``compaction`` items: opaque, issuer-sealed; forward only API-defined fields."""
     encrypted = item.get("encrypted_content")
-    if not _nonempty_str(encrypted):
+    content = _plaintext_reasoning_content(item) if item["type"] == "reasoning" else []
+    if not _nonempty_str(encrypted) and not content:
         return None
     if item["type"] == "compaction":
         return {"type": "compaction", "encrypted_content": encrypted}
@@ -872,10 +891,15 @@ def _preflight_encrypted(item: dict[str, Any], idx: int, ctx: _PreflightCtx) -> 
             return None
         ctx.seen_ids.add(item_id)
     summary = _as_list(item.get("summary"))
-    return {
-        "type": "reasoning", "encrypted_content": encrypted,
+    normalized = {
+        "type": "reasoning",
         "summary": _neutralize_harmony_structure(summary) if ctx.sanitize_harmony_tokens else summary,
     }
+    if _nonempty_str(encrypted):
+        normalized["encrypted_content"] = encrypted
+    if content:
+        normalized["content"] = _neutralize_harmony_structure(content) if ctx.sanitize_harmony_tokens else content
+    return normalized
 
 
 def _preflight_message(item: dict[str, Any], idx: int, ctx: _PreflightCtx) -> dict[str, Any]:
@@ -1101,6 +1125,9 @@ def _extract_responses_message_text(item: Any) -> str:
 
 def _extract_responses_reasoning_text(item: Any) -> str:
     """Compact reasoning text from a Responses reasoning item (summary, else ``text``)."""
+    content = _plaintext_reasoning_content(item)
+    if content:
+        return "".join(part["text"] for part in content)
     chunks = _text_chunks(getattr(item, "summary", None))
     text = getattr(item, "text", None)
     return "\n".join(chunks).strip() if chunks else (text.strip() if isinstance(text, str) else "")
@@ -1138,12 +1165,17 @@ def _response_tool_call(item: Any, item_type: str, index: int) -> SimpleNamespac
 def _capture_encrypted_item(
     item: Any, item_type: str, issuer_kind: Optional[str], issuer_model: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
-    """``{type, encrypted_content[, _issuer_kind, _issuer_model]}`` for replay, or None without a blob. Reasoning
-    items also carry ``id`` + ``summary`` (required by the API on replay); transient ``rs_tmp_`` skip."""
+    """Capture native plaintext/encrypted reasoning for replay with issuer/model provenance.
+    Reasoning items also carry id and summary; transient rs_tmp_ items are skipped."""
     encrypted = getattr(item, "encrypted_content", None)
-    if not _nonempty_str(encrypted):
+    content = _plaintext_reasoning_content(item) if item_type == "reasoning" else []
+    if not _nonempty_str(encrypted) and not content:
         return None
-    raw_item: dict[str, Any] = {"type": item_type, "encrypted_content": encrypted}
+    raw_item: dict[str, Any] = {"type": item_type}
+    if _nonempty_str(encrypted):
+        raw_item["encrypted_content"] = encrypted
+    if content:
+        raw_item["content"] = content
     if issuer_kind:
         raw_item["_issuer_kind"] = issuer_kind
     if issuer_model:

@@ -131,19 +131,118 @@ def get_tool_preview_max_len() -> int:
 _JSON_ESCAPE_RE = re.compile(r"\\(.)")
 
 
-def verbose_tool_args_text(args: dict, max_len: int, code_block: bool) -> str:
-    """Verbose tool-progress args: compact JSON (capped at ``max_len``; 0 = no cap). On markdown
-    platforms it goes in a code block so the formatter keeps it verbatim (``**x**``/``a_b`` are
-    otherwise rendered as markup), with JSON's ``\\n``/``\\t`` shown as real line breaks. Args
-    holding ``` stay plain: Slack and Discord end a code block at any ``` inside it."""
+def verbose_tool_args_text(args: dict, max_len: int, code_block: bool, *, platform=None) -> str:
+    """Format verbose arguments as readable JSON, using a Feishu-specific fence label."""
     import json
-    text = json.dumps(args, ensure_ascii=False, default=str)
+    text = json.dumps(args, ensure_ascii=False, default=str, indent=2)
     if max_len > 0 and len(text) > max_len:
-        text = text[:max_len - 3] + "..."
-    if not code_block or "```" in text:
+        text = _tail_trunc(text, max_len)
+    if not code_block:
         return text
-    decoded = _JSON_ESCAPE_RE.sub(lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(0)), text)
-    return f"```\n{decoded}\n```"
+    text = fence_safe(text)
+    tag = "json" if getattr(platform, "value", platform) == "feishu" else ""
+    return f"```{tag}\n{text}\n```"
+
+
+def fence_safe(text: str) -> str:
+    """Make *text* safe to embed inside a ``` fenced block.
+
+    A value carrying a backtick run would close the fence early and spill the rest of the
+    payload into the message body as prose (2026-10-24: verbose tool args are now reported
+    as a ```json block, and tool args like ``code`` can legitimately contain fences).
+    The run is broken with a zero-width space so it still reads as backticks.
+    """
+    return str(text).replace("\r\n", "\n").replace("```", "``\u200b`")
+
+
+# ── 工具进度上报格式要求（主人 2026-10-24 指定，改这里必须同步保留） ──────────────
+# 1) 命令按分隔符换行：一条 `a; b; echo c` 挤成一行在聊天里读不动，未加引号的顶层
+#    `;` / `&&` / `||` 一律变成换行，运算符留在行尾。
+# 2) 参数按 JSON 格式化输出（indent=2），不要压成一行。
+# 引号内文本、`$( )` 子shell 与 heredoc 正文原样保留，避免改坏命令语义。
+
+_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _split_compound_shell(line: str) -> list[str]:
+    """Split one shell line at top-level unquoted ``;`` / ``&&`` / ``||`` (keeps operators)."""
+    parts: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    escaped = False
+    depth = 0  # $( ) nesting
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and quote != "'":
+            buf.append(ch)
+            escaped = True
+            i += 1
+            continue
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "$" and i + 1 < n and line[i + 1] == "(":
+            depth += 1
+            buf.append("$(")
+            i += 2
+            continue
+        if depth:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ";":
+            parts.append("".join(buf).rstrip() + " ;")
+            buf = []
+            i += 1
+            continue
+        if line[i:i + 2] in ("&&", "||"):
+            parts.append("".join(buf).rstrip() + " " + line[i:i + 2])
+            buf = []
+            i += 2
+            continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf).strip())
+    return [p.strip() for p in parts if p.strip()] or [line.strip()]
+
+
+def wrap_shell_commands(command: str) -> str:
+    """Re-format a shell command for display: one top-level command per line.
+
+    Heredoc bodies are copied verbatim, so an embedded script (``python3 - <<'PY' … PY``)
+    keeps its own line structure even when it contains semicolons.
+    """
+    out: list[str] = []
+    heredoc_end: str | None = None
+    for line in str(command).replace("\r\n", "\n").split("\n"):
+        if heredoc_end is not None:
+            out.append(line)
+            if line.strip() == heredoc_end:
+                heredoc_end = None
+            continue
+        match = _HEREDOC_RE.search(line) if "<<" in line else None
+        out.extend(_split_compound_shell(line))
+        if match:
+            heredoc_end = match.group(2)
+    return "\n".join(out)
 
 
 def set_friendly_tool_labels(enabled: bool) -> None:

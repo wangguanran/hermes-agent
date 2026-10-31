@@ -27,6 +27,8 @@ class TurnContext:
     _thinking_enabled: bool = False
     progress_mode: str = "off"
     progress_grouping: str = "grouped"
+    # Snapshot per turn: the agent.display module's global can change under multiplexing.
+    tool_preview_length: Optional[int] = None
     tool_progress_enabled: bool = False
     progress_queue: Any = None
     log_queue: Any = None

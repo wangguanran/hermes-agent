@@ -1452,6 +1452,12 @@ def create_profile(
                 logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
         from hermes_cli.profiles_initialization import finish_profile_layout
         finish_profile_layout(staging, no_skills=no_skills, clone_all=clone_all, description=description, soul=soul)
+        if not cloning:
+            from hermes_cli.local_profile_tool_defaults import seed_full_toolsets
+            seed_full_toolsets(staging)
+        if sys.platform == "win32":
+            from hermes_cli.local_profile_tool_defaults import enforce_windows_role_policy
+            enforce_windows_role_policy(staging, canon)
         os.rename(staging, profile_dir)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

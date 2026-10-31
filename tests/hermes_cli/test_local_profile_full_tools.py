@@ -1,5 +1,6 @@
 """Local default: a newly created, non-cloned profile enables available toolsets."""
 from pathlib import Path
+import sys
 
 from hermes_cli import profiles
 from hermes_cli.config import read_user_config_raw
@@ -21,6 +22,9 @@ def test_fresh_profile_enables_all_platform_toolsets_and_stt(tmp_path, monkeypat
         actual = set(config["platform_toolsets"][platform])
         expected = {key for key, _, _ in CONFIGURABLE_TOOLSETS
                     if key not in {"stt", "delegation"} and toolset_allowed_for_platform(key, platform)}
+        if sys.platform == "win32":
+            expected.discard("kanban")
+            assert "kanban" not in actual
         assert expected <= actual, f"{platform}: missing {sorted(expected - actual)}"
         assert "stt" not in actual
         assert "delegation" not in actual

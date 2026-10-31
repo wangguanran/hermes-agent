@@ -40,3 +40,37 @@ def seed_full_toolsets(profile_dir: Path) -> None:
         raise ValueError("fresh profile STT configuration is not a mapping")
     stt["enabled"] = True
     atomic_config_write(path, config)
+
+
+def enforce_windows_role_policy(profile_dir: Path, profile_name: str) -> None:
+    """Enforce user policy for Windows profiles, including cloned profiles."""
+    from hermes_cli.config import atomic_config_write, read_user_config_raw
+
+    path = profile_dir / "config.yaml"
+    config = read_user_config_raw(path) if path.is_file() else {}
+    if not isinstance(config, dict):
+        raise ValueError("profile configuration is not a mapping")
+    agent = config.setdefault("agent", {})
+    if not isinstance(agent, dict):
+        raise ValueError("profile agent configuration is not a mapping")
+    disabled = agent.setdefault("disabled_toolsets", [])
+    if not isinstance(disabled, list):
+        raise ValueError("profile disabled_toolsets is not a list")
+    if "delegation" not in disabled:
+        disabled.append("delegation")
+    if profile_name != "driver-engineer":
+        if "kanban" not in disabled:
+            disabled.append("kanban")
+        platforms = config.get("platform_toolsets", {})
+        if not isinstance(platforms, dict):
+            raise ValueError("profile platform_toolsets is not a mapping")
+        for platform, tools in platforms.items():
+            if not isinstance(tools, list):
+                raise ValueError("profile toolset entry is not a list")
+            platforms[platform] = [tool for tool in tools if tool != "kanban"]
+        kanban = config.setdefault("kanban", {})
+        if not isinstance(kanban, dict):
+            raise ValueError("profile kanban configuration is not a mapping")
+        for key in ("dispatch_in_gateway", "notify_in_gateway", "auto_subscribe_on_create", "review_dispatch"):
+            kanban[key] = False
+    atomic_config_write(path, config)

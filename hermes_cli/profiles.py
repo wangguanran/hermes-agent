@@ -1455,6 +1455,9 @@ def create_profile(
         if not cloning:
             from hermes_cli.local_profile_tool_defaults import seed_full_toolsets
             seed_full_toolsets(staging)
+        if sys.platform == "win32":
+            from hermes_cli.local_profile_tool_defaults import enforce_windows_role_policy
+            enforce_windows_role_policy(staging, canon)
         os.rename(staging, profile_dir)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

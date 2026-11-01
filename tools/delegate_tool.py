@@ -568,6 +568,12 @@ def delegate_task(
     if normalized_action and normalized_action != "spawn":
         return tool_error(f"Unknown action '{action}'. Use spawn (default), list, steer, or stop.")
 
+    # The profile denylist must also guard internal callers such as /review;
+    # hiding the model-facing tool alone does not prevent a direct dispatch.
+    from agent.skill_utils import parse_config_string_list
+    if "delegation" in parse_config_string_list(getattr(parent_agent, "disabled_toolsets", None)):
+        return tool_error("Delegation is disabled for this profile.")
+
     # Operator kill switch (TUI / delegation.pause RPC): blocks NEW spawns only.
     if is_spawn_paused():
         return tool_error(

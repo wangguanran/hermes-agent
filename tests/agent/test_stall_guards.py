@@ -344,6 +344,17 @@ def test_detects_trailing_i_will_now():
     assert trailing_continue_intent("Good. I'll now run the linter")
 
 
+def test_detects_chinese_trailing_continue_intent():
+    assert trailing_continue_intent("我先把这个列出来，再统一改。")
+    assert trailing_continue_intent("测试通过。接下来我检查工作树")
+
+
+def test_promoted_reasoning_detector_catches_chinese_plan_tail():
+    from agent.agent_runtime_helpers import promoted_reasoning_announces_action
+
+    assert promoted_reasoning_announces_action("我先按日志定位问题，再修复并验证。")
+
+
 def test_detects_trailing_next_i():
     assert trailing_continue_intent("Done with step one. Next, I check the logs")
     assert trailing_continue_intent("Step one complete. Next: I run the tests")

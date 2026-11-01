@@ -3748,6 +3748,11 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> Any:
         thread_id = (metadata or {}).get("thread_id")
         effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
+        # Feishu rejects create-message requests addressed to some native threads (99992402).
+        # Use a real message in that same thread as the reply anchor. If the lookup is denied
+        # or empty, preserve the existing thread-targeted path; never spill into the parent chat.
+        if thread_id and not effective_reply_to:
+            effective_reply_to = await self._fetch_last_message_in_thread(thread_id)
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),

@@ -168,8 +168,13 @@ class GatewayTurnProgressMixin:
             ctx.log_queue.put(f"{ts}  {tool_name}:{preview_str}".rstrip())
         if not ctx.progress_queue or not ctx._run_still_current():
             return
-        if event_type == "tool.completed" and not ctx.long_tool_hint_fired[0]:
-            self._progress_onboarding_hint(kwargs)
+        if event_type == "tool.completed":
+            if not ctx.long_tool_hint_fired[0]:
+                self._progress_onboarding_hint(kwargs)
+            if (tool_name == "terminal" and ctx.tool_progress_enabled
+                    and ctx.progress_mode == "verbose" and not ctx._native_slack_task_cards
+                    and not self._agent_interrupted()):
+                self._progress_terminal_result(kwargs)
             return
         # "_thinking" is assistant scratch text between tool calls, never ordinary tool progress:
         # only relayed when the platform explicitly opted into thinking_progress.
@@ -205,6 +210,74 @@ class GatewayTurnProgressMixin:
         msg = self._progress_build_message(tool_name, preview, args)
         if msg is not None:
             self._progress_emit(msg)
+
+    def _progress_terminal_result(self, kwargs: dict) -> None:
+        """Deliver terminal output after the verbose ``tool.started`` command block.
+
+        The command is already emitted with ``tool.started``; repeating it here makes
+        every command appear twice. Keep the completion block to its result and status.
+        """
+        import json
+
+        raw_result = kwargs.get("result")
+        if isinstance(raw_result, str):
+            try:
+                result = json.loads(raw_result)
+            except (TypeError, ValueError):
+                result = {"output": raw_result}
+        else:
+            result = raw_result
+        if not isinstance(result, dict):
+            if result is None:
+                return
+            result = {"output": str(result)}
+
+        def _text(value) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return value
+            return json.dumps(value, ensure_ascii=False, default=str)
+
+        output = _text(result.get("output"))
+        error = _text(result.get("error"))
+        if error and error not in output:
+            output = f"{output.rstrip()}\n\nError: {error}" if output else error
+        exit_code = result.get("exit_code")
+        is_error = bool(kwargs.get("is_error"))
+        if not output and exit_code is None and not is_error:
+            return
+        if not output:
+            output = "[no stdout/stderr]"
+
+        extra = []
+        for key in ("truncation_note", "full_output_path", "exit_code_meaning", "hint"):
+            value = _text(result.get(key))
+            if value:
+                extra.append(value)
+
+        try:
+            from agent.redact import redact_for_egress
+            from agent.display import fence_safe
+            safe_output = redact_for_egress(output)
+            safe_extra = [redact_for_egress(value) for value in extra]
+        except Exception:
+            # Fail closed: a failed redaction/import must never publish raw tool output.
+            safe_output = "[redaction-unavailable]"
+            safe_extra = []
+            from agent.display import fence_safe
+
+        chunk_size = 2800
+        chunks = [safe_output[i:i + chunk_size] for i in range(0, len(safe_output), chunk_size)] or [""]
+        for index, chunk in enumerate(chunks):
+            message = f"```text\n{fence_safe(chunk or '[no stdout/stderr]')}\n```"
+            if index == len(chunks) - 1 and (is_error or (exit_code is not None and exit_code != 0)):
+                message += f"\n退出码：{exit_code}" if exit_code is not None else "\n执行失败"
+            if index == len(chunks) - 1 and safe_extra:
+                message += "\n" + "\n".join(safe_extra)
+            # Do not use _progress_emit here: its identical-line dedup would collapse distinct,
+            # repeated commands, while verbose mode promises one result per completed call.
+            self._ctx.progress_queue.put(message)
 
     def _progress_subagent_notice(self, preview, kwargs: dict) -> None:
         """Only terminal failure statuses render (same notice rail as credit warnings)."""
@@ -258,11 +331,15 @@ class GatewayTurnProgressMixin:
         except Exception as err:
             logger.debug("tool-progress onboarding hint failed: %s", err)
 
-    @staticmethod
-    def _preview_cap() -> int:
-        """tool_preview_length (default 40): the one-line preview budget for "all"/"new" modes."""
+    def _preview_length(self) -> int:
+        """Use the turn snapshot rather than another profile's process-global setting."""
         from agent.display import get_tool_preview_max_len
-        pl = get_tool_preview_max_len()
+        value = getattr(self._ctx, "tool_preview_length", None)
+        return max(int(value), 0) if value is not None else get_tool_preview_max_len()
+
+    def _preview_cap(self) -> int:
+        """One-line preview budget for all/new modes; zero falls back to 40."""
+        pl = self._preview_length()
         return pl if pl > 0 else 40
 
     def _progress_terminal_blocks(self, adapter, tool_name, args, emoji):
@@ -277,7 +354,8 @@ class GatewayTurnProgressMixin:
             and isinstance(args.get("command"), str) and args["command"].strip()
         ):
             return None, None
-        cmd_full = args["command"].rstrip()
+        from agent.display import wrap_shell_commands
+        cmd_full = wrap_shell_commands(args["command"].rstrip())
         header = "" if self._ctx.last_was_terminal_block[0] else t("gateway.progress.tool_head", emoji=emoji, tool=tool_name) + "\n"
         cap = self._preview_cap()
         lines = cmd_full.splitlines()
@@ -286,7 +364,12 @@ class GatewayTurnProgressMixin:
             cmd_short = cmd_short[:cap - 3] + "..."
         elif len(lines) > 1:
             cmd_short += " ..."
-        return f"{header}```\n{cmd_full}\n```", f"{header}```\n{cmd_short}\n```"
+        # Local customization: use Feishu's Chinese terminal label without changing Slack rendering.
+        turn_context = getattr(self, "_ctx", None)
+        source_platform = getattr(getattr(turn_context, "source", None), "platform", None)
+        language_tag = "终端" if getattr(source_platform, "value", source_platform) == "feishu" else ""
+        fence = f"```{language_tag}"
+        return f"{header}{fence}\n{cmd_full}\n```", f"{header}{fence}\n{cmd_short}\n```"
 
     def _progress_build_message(self, tool_name, preview, args) -> Optional[str]:
         """Render the progress line. Verbose mode queues directly (no dedup) and returns None."""
@@ -303,11 +386,11 @@ class GatewayTurnProgressMixin:
         ctx.last_was_terminal_block[0] = code is not None
         if verbose:
             if code is None and args:
-                from agent.display import get_tool_preview_max_len, verbose_tool_args_text
-                # tool_preview_length 0 (default) = no truncation in verbose mode; the user asked
-                # for full detail and platform message-length limits handle the rest.
-                args_str = verbose_tool_args_text(args, get_tool_preview_max_len(),
-                                                  getattr(adapter, "supports_code_blocks", False))
+                from agent.display import verbose_tool_args_text
+                # The per-turn snapshot prevents other profiles from changing this cap mid-turn.
+                args_str = verbose_tool_args_text(args, self._preview_length(),
+                                                  getattr(adapter, "supports_code_blocks", False),
+                                                  platform=getattr(ctx.source, "platform", None))
                 code = t("gateway.progress.tool_verbose", emoji=emoji, tool=tool_name, keys=list(args.keys()), args=args_str)
             elif code is None:
                 code = (t("gateway.progress.tool_preview", emoji=emoji, tool=tool_name, preview=preview) if preview
@@ -697,8 +780,11 @@ class GatewayTurnProgressMixin:
                     await self._flush_progress_edit(st)
                     self._reset_progress_bubble(st)
                 else:
-                    self._progress_absorb(st, raw)
-                    await self._roll_progress_overflow_if_needed(st)
+                    msg = self._progress_absorb(st, raw)
+                    if not st.can_edit:
+                        await self._send_progress_text(st, msg)
+                    else:
+                        await self._roll_progress_overflow_if_needed(st)
         # Final edit with all remaining tools (only if editing works)
         if st.can_edit and st.progress_lines and st.progress_msg_id:
             await self._roll_progress_overflow_if_needed(st)
@@ -772,7 +858,7 @@ class GatewayTurnProgressMixin:
                     # Throttle edits: batch rapid tool updates into fewer API calls (grammY pattern:
                     # proactively rate-limit rather than react to 429s). Loop back to drain further
                     # queued messages before sending a single batched edit.
-                    remaining = EDIT_INTERVAL - (time.monotonic() - last_edit_ts)
+                    remaining = EDIT_INTERVAL - (time.monotonic() - last_edit_ts) if st.can_edit else 0
                     if remaining > 0:
                         await asyncio.sleep(remaining)
                         continue
@@ -783,7 +869,11 @@ class GatewayTurnProgressMixin:
                 last_edit_ts = time.monotonic()
                 await self._progress_restore_typing(st)
             except queue.Empty:
-                await asyncio.sleep(0.3)
+                try:
+                    await asyncio.sleep(0.3)
+                except asyncio.CancelledError:
+                    await self._drain_progress_on_cancel(st)
+                    return
             except asyncio.CancelledError:
                 await self._drain_progress_on_cancel(st)
                 return

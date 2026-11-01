@@ -1,59 +1,84 @@
-"""Verbose tool-progress args on markdown platforms: a code block on both progress paths."""
+"""Canonical JSON formatting for verbose tool-progress arguments."""
 
-import pytest
+import json
 
+from agent.display import verbose_tool_args_text
+from gateway.config import Platform, PlatformConfig
+from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.stream_events import ToolCallChunk
-from tests.gateway.test_run_progress_topics import ProgressCaptureAdapter, _run_with_agent
-from tests.waiting import wait_until
-
-CODE = "x = a_b\nprint(**kw)"
 
 
-class _CodeBlockAdapter(ProgressCaptureAdapter):
+ARGS = {"code": "x = a_b\nprint(**kw)"}
+
+
+class _Adapter(BasePlatformAdapter):
     supports_code_blocks = True
 
+    async def connect(self, *, is_reconnect=False):
+        return True
 
-class _ArgsAgent:
-    """Emits one non-terminal tool call whose args look like markdown and span lines."""
+    async def disconnect(self):
+        return None
 
-    adapter = None
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        return SendResult(success=True, message_id="unused")
 
-    def __init__(self, **kwargs):
-        self.tool_progress_callback = kwargs.get("tool_progress_callback")
-        self.tools = []
-
-    def run_conversation(self, message, conversation_history=None, task_id=None, **kwargs):
-        self.tool_progress_callback("tool.started", "execute_code", None, {"code": CODE})
-        wait_until(lambda: _ArgsAgent.adapter.sent, what="the progress bubble was sent")
-        return {"final_response": "done", "messages": [], "api_calls": 1}
+    async def get_chat_info(self, chat_id):
+        return {"id": chat_id}
 
 
-async def _progress_text(monkeypatch, tmp_path, adapter_cls) -> str:
-    class Capture(adapter_cls):
-        def __init__(self, **kw):
-            super().__init__(**kw)
-            _ArgsAgent.adapter = self
-
-    adapter, _ = await _run_with_agent(monkeypatch, tmp_path, _ArgsAgent, session_id=f"sess-{adapter_cls.__name__}",
-                                       config_data={"display": {"tool_progress": "verbose"}}, adapter_cls=Capture)
-    return " ".join(c["content"] for c in adapter.sent + adapter.edits)
+def _json_body(rendered, opening):
+    assert rendered.startswith(opening), rendered
+    assert rendered.endswith("\n```") or rendered.endswith("```")
+    start = len(opening)
+    end = rendered.rfind("\n```")
+    assert end >= start, rendered
+    return rendered[start:end]
 
 
-@pytest.mark.asyncio
-async def test_verbose_args_render_in_a_code_block_on_markdown_platforms(monkeypatch, tmp_path):
-    """Markdown platforms get a code block with real line breaks (else a_b / **kw** render as
-    markup and JSON newlines show as a literal \\n); plain platforms keep the JSON line."""
-    md_text = await _progress_text(monkeypatch, tmp_path, _CodeBlockAdapter)
-    plain_text = await _progress_text(monkeypatch, tmp_path, ProgressCaptureAdapter)
-    assert '```\n{"code": "x = a_b\nprint(**kw)"}\n```' in md_text, md_text
-    assert '{"code": "x = a_b\\nprint(**kw)"}' in plain_text and "```" not in plain_text, plain_text
+def test_feishu_verbose_args_are_indented_json_in_json_fence():
+    rendered = verbose_tool_args_text(ARGS, 0, True, platform=Platform.FEISHU)
+    body = _json_body(rendered, "```json\n")
+    assert body.startswith("{\n  \"code\": "), body
+    assert json.loads(body) == ARGS
 
 
-def test_streamed_verbose_args_share_the_code_block_and_skip_it_for_embedded_fences():
-    """format_tool_event (streamed tool chrome) renders the same block; args holding ``` anywhere
-    stay plain JSON, since Slack/Discord would end the block there and render the rest as markup."""
-    adapter = object.__new__(_CodeBlockAdapter)
-    out = adapter.format_tool_event(ToolCallChunk("execute_code", args={"code": "a\nb"}), mode="verbose")
-    assert out.endswith('```\n{"code": "a\nb"}\n```'), out
-    nested = adapter.format_tool_event(ToolCallChunk("execute_code", args={"code": "see ```**k**``` x"}), mode="verbose")
-    assert nested.endswith('\n{"code": "see ```**k**``` x"}'), nested
+def test_plain_verbose_args_are_indented_valid_json_without_fence():
+    rendered = verbose_tool_args_text(ARGS, 0, False, platform=Platform.TELEGRAM)
+    assert rendered.startswith("{\n  \"code\": "), rendered
+    assert "```" not in rendered
+    assert json.loads(rendered) == ARGS
+
+
+def test_embedded_backtick_fences_are_safely_broken_inside_json():
+    rendered = verbose_tool_args_text(
+        {"code": "see ```**kw**```"}, 0, True, platform=Platform.FEISHU
+    )
+    body = _json_body(rendered, "```json\n")
+    assert "```" not in body
+    assert "\u200b" in body
+    assert "\u200b" in json.loads(body)["code"]
+
+
+def test_streamed_feishu_verbose_args_share_json_formatting():
+    adapter = _Adapter(PlatformConfig(enabled=True, token="***"), Platform.FEISHU)
+    rendered = adapter.format_tool_event(
+        ToolCallChunk("execute_code", args=ARGS), mode="verbose"
+    )
+    assert rendered is not None
+    from agent.display import get_tool_emoji
+    assert rendered.startswith(f"{get_tool_emoji('execute_code', default='⚙️')} execute_code"), rendered
+    body = _json_body(rendered[rendered.index("```json\n"):], "```json\n")
+    assert json.loads(body) == ARGS
+
+
+def test_streamed_slack_verbose_args_keep_untagged_code_fence():
+    adapter = _Adapter(PlatformConfig(enabled=True, token="***"), Platform.SLACK)
+    rendered = adapter.format_tool_event(
+        ToolCallChunk("execute_code", args=ARGS), mode="verbose"
+    )
+    assert rendered is not None
+    assert "```json" not in rendered
+    assert "```\n{" in rendered
+    body = rendered.rsplit("```\n", 1)[-1].removesuffix("\n```")
+    assert json.loads(body) == ARGS

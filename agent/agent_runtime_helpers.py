@@ -3386,13 +3386,38 @@ _TRAILING_CONTINUE_INTENT_RE = re.compile(
 # Content longer than this is a substantive reply, not a dangling ack.
 _TRAILING_CONTINUE_INTENT_MAX_CHARS = 400
 
+# Chinese plan-tail detector. Chinese has no word boundaries, so the English regexes above never
+# fire on replies like "我先把这个列出来，再统一改。" — the stall guard then stays silent and the
+# turn ends with zero tool calls (looks like the model "pausing" mid-task). Mirrors the same shape:
+# a first-person future-action marker opening the LAST sentence.
+_CN_PLAN_TAIL_RE = re.compile(
+    r"(?:^|[\u3002\uff01\uff1f\uff1b\uff0c\u2014\u2013\n])\s*"
+    r"(?:我(?:先|来|这就|马上|立刻|现在|接下来|再去)|下一步|然后我|接着我|下面我|我再去"
+    r"|接下来(?:我|要|会|去|再)|随后(?:我)?|之后我)"
+)
+
+
+def _cn_plan_tail(text: str, window: int = 160) -> bool:
+    return bool(_CN_PLAN_TAIL_RE.search((text or "").strip()[-window:]))
+
+
+# Mid-sentence variants: Chinese narrations usually read "…我先按日志对现场：…" — the marker is not
+# at a sentence boundary. Deliberately narrower than the sentence-start set (no bare 下一步/接下来,
+# which appear in legitimate written plans).
+_CN_PLAN_ANY_RE = re.compile(r"我(?:先|这就|马上|立刻|接下来|再去)|然后我|接着我")
+
 
 def trailing_continue_intent(text: str) -> bool:
     """Whether ``text`` is a short reply ENDING on an announced next action (stall-guard re-prompt trigger)."""
     t = (text or "").strip()
     if not t or len(t) > _TRAILING_CONTINUE_INTENT_MAX_CHARS:
         return False
-    return bool(_TRAILING_CONTINUE_INTENT_RE.search(t[-160:]))
+    tail = t[-160:]
+    return bool(
+        _TRAILING_CONTINUE_INTENT_RE.search(tail)
+        or _CN_PLAN_TAIL_RE.search(tail)
+        or _CN_PLAN_ANY_RE.search(tail)
+    )
 
 
 # Broader tail detector for PROMOTED REASONING only (reasoning-only clean stop with tools offered
@@ -3430,7 +3455,8 @@ def promoted_reasoning_announces_action(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
-    return bool(_PROMOTED_REASONING_PLAN_TAIL_RE.search(t[-240:]))
+    tail = t[-240:]
+    return bool(_PROMOTED_REASONING_PLAN_TAIL_RE.search(tail) or _CN_PLAN_TAIL_RE.search(tail))
 
 
 _INTENT_ACK_ON = {"true", "always", "yes", "on"}

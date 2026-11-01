@@ -3360,6 +3360,7 @@ def _run_one_job_body(
             "execution_id": execution_id}
         if fence.cancel_event is not None:
             _run_kwargs["cancel_event"] = fence.cancel_event
+        _report_started = time.monotonic()
         try:
             success, output, final_response, error = run_job(job, **_run_kwargs)
         except BaseException:
@@ -3372,6 +3373,13 @@ def _run_one_job_body(
             _teardown_deferred()
             _record_fire_ownership_lost(job, fire_owner, execution_id)
             return True
+
+        if success and not job.get("no_agent"):
+            from cron.local_report_footer import replace_report_footer
+            original_response = final_response
+            final_response = replace_report_footer(final_response, time.monotonic() - _report_started)
+            if original_response and original_response != final_response and original_response in output:
+                output = output.replace(original_response, final_response, 1)
 
         success, error, agent_declared = _apply_agent_failure_marker(job, success, error, final_response)
 

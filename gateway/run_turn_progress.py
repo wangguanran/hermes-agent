@@ -168,6 +168,15 @@ class GatewayTurnProgressMixin:
             ctx.log_queue.put(f"{ts}  {tool_name}:{preview_str}".rstrip())
         if not ctx.progress_queue or not ctx._run_still_current():
             return
+        # WeCom private details use their own fail-closed, sanitized egress. The
+        # source gate must be per turn: the same bot also serves group chats.
+        from gateway.wecom_private_progress import enabled_for_dm, format_event
+        if ctx.tool_progress_enabled and enabled_for_dm(ctx):
+            if not self._agent_interrupted():
+                msg = format_event(ctx, event_type, tool_name, args, kwargs)
+                if msg is not None:
+                    ctx.progress_queue.put(msg)
+            return
         if event_type == "tool.completed":
             if not ctx.long_tool_hint_fired[0]:
                 self._progress_onboarding_hint(kwargs)
@@ -706,8 +715,15 @@ class GatewayTurnProgressMixin:
 
     async def _send_progress_text(self, st, text: str):
         ctx = self._ctx
+        from gateway.wecom_private_progress import enabled_for_dm
+        # A private progress message must not consume the reply req_id that the
+        # native answer stream still needs. The adapter consumes metadata flags.
+        metadata = ctx._progress_metadata
+        if enabled_for_dm(ctx):
+            metadata = dict(metadata or {})
+            metadata["force_proactive_send"] = True
         result = await st.adapter.send(
-            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata,
+            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to, metadata=metadata,
         )
         self._track_progress_result(result)
         return result
@@ -833,7 +849,8 @@ class GatewayTurnProgressMixin:
         # each update would be a separate bubble. getattr, not attribute access: duck-typed
         # adapters (test fakes, minimal plugins) may lack edit_message — treated as "can't edit".
         adapter_edit = getattr(type(adapter), "edit_message", None)
-        if adapter_edit is None or adapter_edit is BasePlatformAdapter.edit_message:
+        from gateway.wecom_private_progress import enabled_for_dm
+        if (adapter_edit is None or adapter_edit is BasePlatformAdapter.edit_message) and not enabled_for_dm(ctx):
             self._drain_progress_queue()
             return
         st = self._progress_edit_state(adapter)

@@ -473,6 +473,33 @@ def _make_runner(adapter):
     return runner
 
 
+def test_wecom_private_tool_details_keep_group_progress_private(monkeypatch):
+    """The same WeCom bot shows details only to a DM, never a group or unknown chat."""
+    gateway_run = importlib.import_module("gateway.run")
+    config = {"display": {"platforms": {"wecom": {"private_tool_details": True, "tool_progress": "verbose",
+                                                   "thinking_progress": True}}}}
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: config)
+    adapter = ProgressCaptureAdapter(platform=Platform.WECOM)
+    runner = _make_runner(adapter)
+    dm = runner._run_agent_display_settings(SessionSource(platform=Platform.WECOM, chat_id="dm", chat_type="dm"))
+    group = runner._run_agent_display_settings(SessionSource(platform=Platform.WECOM, chat_id="group", chat_type="group"))
+    unknown = runner._run_agent_display_settings(SessionSource(platform=Platform.WECOM, chat_id="other", chat_type=""))
+    assert (dm.progress_mode, dm.tool_progress_enabled, dm.progress_grouping) == ("verbose", True, "separate")
+    assert (group.progress_mode, group.tool_progress_enabled, group.interim_assistant_messages_enabled) == ("off", False, True)
+    assert group._thinking_enabled is False
+    assert (unknown.progress_mode, unknown.tool_progress_enabled) == ("off", False)
+
+
+def test_wecom_private_details_opt_in_does_not_change_other_platforms(monkeypatch):
+    gateway_run = importlib.import_module("gateway.run")
+    config = {"display": {"platforms": {"wecom": {"private_tool_details": True},
+                                        "feishu": {"tool_progress": "all"}}}}
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: config)
+    runner = _make_runner(ProgressCaptureAdapter(platform=Platform.FEISHU))
+    source = SessionSource(platform=Platform.FEISHU, chat_id="group", chat_type="group")
+    assert runner._run_agent_display_settings(source).progress_mode == "all"
+
+
 def test_tool_progress_mode_reads_profile_scope_not_process_environ(monkeypatch, tmp_path):
     """HERMES_TOOL_PROGRESS_MODE must resolve through the active profile's secret scope, not
     process-wide ``os.environ``. Under gateway multiplexing ``os.environ`` carries whichever

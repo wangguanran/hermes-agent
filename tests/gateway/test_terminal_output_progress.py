@@ -33,6 +33,126 @@ def _messages(progress_queue):
     return results
 
 
+def test_wecom_dm_progress_filters_secrets_and_host_paths():
+    turn, progress_queue = _turn()
+    turn._ctx.source = SimpleNamespace(platform="wecom", chat_type="dm", chat_id="private")
+    turn._ctx.user_config = {"display": {"platforms": {"wecom": {"private_tool_details": True}}}}
+    command = "printf hello; echo token=super-secret-value-123456; ls /Users/example/private"
+    result = json.dumps({"output": "hello\ntoken=super-secret-value-123456\n/Volumes/private/a.txt", "exit_code": 0})
+    turn.progress_callback("tool.started", "terminal", None, {"command": command}, tool_call_id="c1")
+    turn.progress_callback("tool.completed", "terminal", None, {"command": command},
+                           result=result, is_error=False, tool_call_id="c1")
+    messages = _messages(progress_queue)
+    assert len(messages) == 2
+    assert "printf hello" in messages[0]
+    assert "hello" in messages[1]
+    assert "super-secret-value-123456" not in "".join(messages)
+    assert "/Users/example/private" not in "".join(messages)
+    assert "/Volumes/private/a.txt" not in "".join(messages)
+
+
+def test_wecom_dm_suppresses_sensitive_command_output():
+    turn, progress_queue = _turn()
+    turn._ctx.source = SimpleNamespace(platform="wecom", chat_type="dm", chat_id="private")
+    turn._ctx.user_config = {"display": {"platforms": {"wecom": {"private_tool_details": True}}}}
+    turn.progress_callback("tool.started", "terminal", None, {"command": "printenv"}, tool_call_id="c2")
+    turn.progress_callback("tool.completed", "terminal", None, None, tool_call_id="c2",
+                           result=json.dumps({"output": "OPAQUE_VALUE=unguessable-private-value", "exit_code": 0}))
+    messages = _messages(progress_queue)
+    assert len(messages) == 2
+    assert "unguessable-private-value" not in "".join(messages)
+    assert "已隐藏" in messages[1]
+
+
+def test_wecom_terminal_completion_uses_real_executor_args_without_call_id():
+    turn, progress_queue = _turn()
+    turn._ctx.source = SimpleNamespace(platform="wecom", chat_type="dm", chat_id="private")
+    turn._ctx.user_config = {"display": {"platforms": {"wecom": {"private_tool_details": True}}}}
+    command = {"command": "printf hello"}
+    turn.progress_callback("tool.started", "terminal", None, command)
+    turn.progress_callback("tool.completed", "terminal", None, command,
+                           result=json.dumps({"output": "hello", "exit_code": 0}))
+    messages = _messages(progress_queue)
+    assert len(messages) == 2
+    assert "hello" in messages[1]
+    assert "已隐藏" not in messages[1]
+
+
+def test_wecom_private_progress_redacts_quoted_secrets_and_multiple_host_path_styles():
+    turn, progress_queue = _turn()
+    turn._ctx.source = SimpleNamespace(platform="wecom", chat_type="dm", chat_id="private")
+    turn._ctx.user_config = {"display": {"platforms": {"wecom": {"private_tool_details": True}}}}
+    args = {"password": "alpha phrase omega", "paths": ["/home/alice/private.txt", "/home/rantu/ok.txt"]}
+    turn.progress_callback("tool.started", "search_files", None, args)
+    text = "".join(_messages(progress_queue))
+    assert "alpha phrase omega" not in text
+    assert "phrase omega" not in text
+    assert "/home/alice/private.txt" not in text
+    assert "/home/rantu/ok.txt" in text
+
+
+def test_wecom_unmatched_sensitive_completion_fails_closed():
+    turn, progress_queue = _turn()
+    turn._ctx.source = SimpleNamespace(platform="wecom", chat_type="dm", chat_id="private")
+    turn._ctx.user_config = {"display": {"platforms": {"wecom": {"private_tool_details": True}}}}
+    turn.progress_callback("tool.completed", "terminal", None, None,
+                           result=json.dumps({"output": "opaque-secret-content", "exit_code": 0}))
+    text = "".join(_messages(progress_queue))
+    assert "opaque-secret-content" not in text
+    assert "已隐藏" in text
+
+
+def test_wecom_progress_redacts_exact_values_in_active_secret_scope():
+    from agent.secret_scope import reset_secret_scope, set_secret_scope
+    turn, progress_queue = _turn()
+    turn._ctx.source = SimpleNamespace(platform="wecom", chat_type="dm", chat_id="private")
+    turn._ctx.user_config = {"display": {"platforms": {"wecom": {"private_tool_details": True}}}}
+    token = set_secret_scope({"SOME_API_KEY": "opaque-credential-value"})
+    try:
+        turn.progress_callback("tool.started", "web_search", None, {"query": "opaque-credential-value"})
+        assert "opaque-credential-value" not in "".join(_messages(progress_queue))
+    finally:
+        reset_secret_scope(token)
+
+
+def test_wecom_dm_non_editing_adapter_delivers_progress_without_consuming_stream():
+    import asyncio
+    from unittest.mock import AsyncMock
+    from gateway.config import PlatformConfig
+    from plugins.platforms.wecom.adapter import APP_CMD_SEND, WeComAdapter
+
+    turn, progress_queue = _turn()
+    ctx = turn._ctx
+    ctx.source = SimpleNamespace(platform="wecom", chat_type="dm", chat_id="private")
+    ctx.user_config = {"display": {"platforms": {"wecom": {"private_tool_details": True}}}}
+    ctx.progress_grouping, ctx._progress_reply_to, ctx._progress_metadata = "separate", "reply", {}
+    ctx._cleanup_progress, ctx._cleanup_msg_ids = False, []
+    adapter = WeComAdapter(PlatformConfig(enabled=True))
+    adapter._last_chat_req_ids["private"] = "cached-stream-request"
+    adapter._send_request = AsyncMock(return_value={"errcode": 0})
+    adapter._send_reply_request = AsyncMock(return_value={"errcode": 0})
+
+    async def typing(*args, **kwargs):
+        pass
+
+    adapter.send_typing = typing
+    turn._runner._delivery_adapter_for = lambda _source: adapter
+    progress_queue.put("tool started")
+    progress_queue.put("tool result")
+
+    async def run():
+        task = asyncio.create_task(turn.send_progress_messages())
+        await asyncio.sleep(0.1)
+        task.cancel()
+        await task
+
+    asyncio.run(run())
+    calls = adapter._send_request.await_args_list
+    assert [call.args[1]["markdown"]["content"] for call in calls] == ["tool started", "tool result"]
+    assert all(call.args[0] == APP_CMD_SEND for call in calls)
+    adapter._send_reply_request.assert_not_awaited()
+
+
 def test_verbose_terminal_command_is_followed_immediately_by_its_result():
     turn, progress_queue = _turn()
     command = "printf 'first line\\nsecond line\\n'"

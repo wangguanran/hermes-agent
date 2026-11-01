@@ -1036,6 +1036,18 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         )
         # "accumulate" (edit one bubble) or "separate" (one msg per tool)
         progress_grouping = resolve_display_setting(user_config, platform_key, "tool_progress_grouping") or "accumulate"
+        # WeCom's group messages can be read by other members. When opted in, only an
+        # explicitly identified DM receives detailed tool events; unknown types fail closed.
+        from utils import is_truthy_value
+        wecom_display = ((user_config.get("display") or {}).get("platforms") or {}).get("wecom") or {}
+        private_wecom_details = (
+            platform_key == "wecom" and isinstance(wecom_display, dict)
+            and is_truthy_value(wecom_display.get("private_tool_details"), default=False)
+        )
+        if private_wecom_details:
+            is_private_dm = getattr(source, "chat_type", None) == "dm"
+            progress_mode = "verbose" if is_private_dm else "off"
+            progress_grouping = "separate" if is_private_dm else progress_grouping
         _generic_status_recent: list[str] = []
         _generic_status_catalog = resolve_status_phrase_catalog(user_config, platform_key)
 
@@ -1085,9 +1097,13 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
             "interim_assistant_messages", default=True, require_platform_override_for={Platform.MATTERMOST},
         )
         interim_assistant_messages_enabled = not is_webhook and interim_assistant_messages_mode != "off"
+        if private_wecom_details and getattr(source, "chat_type", None) == "group":
+            interim_assistant_messages_enabled = True
         _thinking_enabled = _display_surface_mode(
             "thinking_progress", default=False, require_platform_override_for={Platform.MATTERMOST},
         ) != "off"
+        if private_wecom_details and getattr(source, "chat_type", None) != "dm":
+            _thinking_enabled = False
         # Slack-native task cards need the progress queue even with text tool_progress off.
         # Slack-native task cards (#29483): when the Slack adapter's opt-in is set, tool progress renders as
         # native plan/task cards via chat.startStream — the progress queue is needed even though Slack keeps

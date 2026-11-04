@@ -15,6 +15,7 @@ This manifest covers source changes in the personal fork; it does not authorize 
 - `agent/codex_responses_adapter.py`, `agent/chat_completion_helpers.py`, `agent/error_classifier.py`, `agent/transports/codex.py`, `run_agent.py`, `agent/responses_plaintext_reasoning.py`, and corresponding tests — retain Responses reasoning needed for subsequent tool requests and classify related validation failures.
 - `agent/agent_runtime_helpers.py`, `agent/display.py`, `agent/tool_executor.py`, `gateway/platforms/base.py`, `gateway/run_turn.py`, `gateway/run_turn_progress.py`, `gateway/turn_context.py`, `plugins/platforms/feishu/adapter.py`, `hermes_cli/profiles.py`, and corresponding tests — preserve terminal progress/result formatting, Feishu thread anchoring, and the profile-creation policy.
 - `pm/store.py` and `tests/pm/test_tree_digest_finder_metadata.py` — ignore Finder `.DS_Store` metadata when computing the package tree digest. This addresses macOS Finder artifacts; do not include this behavior in Windows/134 deployment payloads unless target-specific evidence requires it.
+- `scripts/repair_legacy_chat_binding.py`, its regression assertions and [operator guide](legacy-chat-binding-recovery.md) — explicitly renew a relocated, already-owned legacy Bot Chat's verified configuration reference and workspace under an exclusive offline maintenance lock; preserve identity, history and unrelated state. This does not authorize live maintenance, profile identity rewriting or a Gateway restart.
 
 ## Migration and verification
 

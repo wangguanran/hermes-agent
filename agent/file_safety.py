@@ -228,6 +228,18 @@ def get_safe_write_roots() -> set[str]:
     return roots
 
 
+def get_file_denied_roots() -> set[str]:
+    """Operator-specified file/dir denies, supplementing the native guardrails.
+
+    Like the write sandbox, this is file-tool defense-in-depth, not an OS
+    boundary. Internal credential consumers are intentionally unaffected.
+    """
+    roots: set[str] = set()
+    for path in filter(None, os.getenv("HERMES_FILE_DENY_ROOTS", "").split(os.pathsep)):
+        roots.add(os.path.realpath(os.path.expanduser(path)))
+    return roots
+
+
 def build_write_approval_paths(home: str) -> set[str]:
     """Paths that need human APPROVAL to write but are not hard-denied credentials.
 
@@ -279,6 +291,8 @@ def _classify_write_denial(path: str, *, entry: bool = False) -> Optional[str]:
 
 def _classify_resolved_write_denial(homes: set[str], resolved: str) -> Optional[str]:
     """Credential / protected-subpath / safe-root verdict for an already-resolved path."""
+    if any(_is_under(Path(resolved), root) for root in get_file_denied_roots()):
+        return "credential"
     # Approval-gated paths are allowed at this layer so interactive tools can
     # prompt; checked first so the ``.ssh/`` prefix deny doesn't swallow them.
     if any(resolved in build_write_approval_paths(home) for home in homes):
@@ -386,6 +400,8 @@ def get_read_block_error(path: str) -> Optional[str]:
     if nt_error:
         return nt_error
     resolved = Path(path).expanduser().resolve()
+    if any(_is_under(resolved, root) for root in get_file_denied_roots()):
+        return f"Access denied: {path} is protected by the operator file policy." + _DID_SUFFIX
     hermes_dirs = _hermes_dirs()
     reason = None
     if any(_is_under(resolved, hd / "skills" / ".hub") for hd in hermes_dirs):

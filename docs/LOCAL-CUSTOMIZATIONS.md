@@ -15,6 +15,7 @@ This manifest covers source changes in the personal fork; it does not authorize 
 - `agent/codex_responses_adapter.py`, `agent/chat_completion_helpers.py`, `agent/error_classifier.py`, `agent/transports/codex.py`, `run_agent.py`, `agent/responses_plaintext_reasoning.py`, and corresponding tests — retain Responses reasoning needed for subsequent tool requests and classify related validation failures.
 - `agent/agent_runtime_helpers.py`, `agent/display.py`, `agent/tool_executor.py`, `gateway/platforms/base.py`, `gateway/run_turn.py`, `gateway/run_turn_progress.py`, `gateway/turn_context.py`, `plugins/platforms/feishu/adapter.py`, `hermes_cli/profiles.py`, and corresponding tests — preserve terminal progress/result formatting, Feishu thread anchoring, and the profile-creation policy.
 - `pm/store.py` and `tests/pm/test_tree_digest_finder_metadata.py` — ignore Finder `.DS_Store` metadata when computing the package tree digest. This addresses macOS Finder artifacts; do not include this behavior in Windows/134 deployment payloads unless target-specific evidence requires it.
+- `plugins/platforms/feishu/adapter.py` and `tests/gateway/test_feishu_approval_thread_routing.py` — retain the approval card's original thread ID in callback state and reply to that card for expired-approval notices. Preserve thread metadata so a withdrawn or missing card cannot cause a top-level fallback and create a non-task topic.
 
 ## Migration and verification
 

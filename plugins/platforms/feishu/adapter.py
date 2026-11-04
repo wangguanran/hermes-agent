@@ -1339,7 +1339,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._media_batch_state = FeishuBatchState()
         self._pending_media_batches = self._media_batch_state.events
         self._pending_media_batch_tasks = self._media_batch_state.tasks
-        # Button-card state: id → {session_key, message_id, chat_id}
+        # Button-card state: id → {session_key, message_id, chat_id, thread_id}
         self._approval_state: dict[int, dict[str, str]] = {}
         self._approval_counter = itertools.count(1)
         self._update_prompt_state: dict[int, dict[str, str]] = {}
@@ -1808,6 +1808,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 "session_key": session_key,
                 "message_id": result.message_id or "",
                 "chat_id": chat_id,
+                "thread_id": str((metadata or {}).get("thread_id") or ""),
             }
         return result
 
@@ -2356,15 +2357,14 @@ class FeishuAdapter(BasePlatformAdapter):
                 count, state["session_key"], choice, user_name,
             )
             if not count and choice != "deny":
-                # The card already reads "Approved" (synchronous callback), but nothing was
-                # waiting — the wait timed out (fail-closed deny) or was resolved via /approve.
-                # Correct the record so the user doesn't believe the command ran.
+                # A late approval must not imply execution or escape the card's topic.
                 _chat = str(state.get("chat_id", "") or chat_id or "")
                 if _chat:
                     try:
                         await self.send(
-                            _chat,
-                            t("platform.shared.approval_expired"),
+                            _chat, t("platform.shared.approval_expired"),
+                            reply_to=state.get("message_id") or None,
+                            metadata={"thread_id": state["thread_id"]} if state.get("thread_id") else None,
                         )
                     except Exception:
                         logger.debug("[Feishu] expired-approval notice failed", exc_info=True)

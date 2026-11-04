@@ -16,6 +16,7 @@ This manifest covers source changes in the personal fork; it does not authorize 
 - `agent/agent_runtime_helpers.py`, `agent/display.py`, `agent/tool_executor.py`, `gateway/platforms/base.py`, `gateway/run_turn.py`, `gateway/run_turn_progress.py`, `gateway/turn_context.py`, `plugins/platforms/feishu/adapter.py`, `hermes_cli/profiles.py`, and corresponding tests — preserve terminal progress/result formatting, Feishu thread anchoring, and the profile-creation policy.
 - `pm/store.py` and `tests/pm/test_tree_digest_finder_metadata.py` — ignore Finder `.DS_Store` metadata when computing the package tree digest. This addresses macOS Finder artifacts; do not include this behavior in Windows/134 deployment payloads unless target-specific evidence requires it.
 - `plugins/platforms/feishu/adapter.py` and `tests/gateway/test_feishu_approval_thread_routing.py` — retain the approval card's original thread ID in callback state and reply to that card for expired-approval notices. Preserve thread metadata so a withdrawn or missing card cannot cause a top-level fallback and create a non-task topic.
+- `scripts/local/approval-thread-container/` — minimal, checksum-verified container patch recipe plus offline SDK-boundary and fresh-Gateway boot/idle-exit verifiers. Preserve exact production bases and intentional dependency variants; candidate validation does not authorize a production cutover or prove real Feishu delivery.
 
 ## Migration and verification
 

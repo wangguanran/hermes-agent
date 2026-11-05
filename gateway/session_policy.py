@@ -230,6 +230,11 @@ class LocalSessionPolicy:
             for part in source:
                 value = value.get(part) if isinstance(value, dict) else None
             config['model']['api_key'] = value
+        # Work-home budgets are administrative execution policy, not a session pin.
+        from hermes_cli.meig_budget_routing import apply_budget_policy
+        db_path = getattr(getattr(authority, 'db', None), 'db_path', None)
+        home = Path(db_path).resolve().parent if isinstance(db_path, (str, Path)) else None
+        config = apply_budget_policy(config, home)
         return config, model
 
     @cached_property

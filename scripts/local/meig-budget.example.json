@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "hermes_home": "/home/agent/.hermes",
+  "upstream": "http://192.168.0.18",
+  "port": 18181,
+  "cap": 200000000,
+  "poll_seconds": 30,
+  "stale_seconds": 90
+}

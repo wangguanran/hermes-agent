@@ -10,6 +10,8 @@ This manifest covers source changes in the personal fork; it does not authorize 
 
 ## Repository changes
 
+- `tools/terminal_tool_guards.py` and `tests/tools/test_lifecycle_guard_backend_reads.py` — use host-file reads only for the local terminal backend. Avoid redundantly retrying nonexistent local paths via the remote-reader callback; preserve the original core lifecycle scanner, all scan budgets, fail-closed checks and remote-backend behavior. Source-level validation does not prove that a running Gateway loaded the change or authorize restarting it.
+
 - `cron/local_report_footer.py`, `cron/scheduler.py`, and corresponding tests — preserve the local scheduled-report footer and timing behavior.
 - `hermes_cli/local_profile_tool_defaults.py`, `hermes_cli/profiles.py`, `tools/delegate_tool.py`, and corresponding tests — keep delegation disabled when creating or cloning profiles; retain other role-specific policy.
 - `agent/codex_responses_adapter.py`, `agent/chat_completion_helpers.py`, `agent/error_classifier.py`, `agent/transports/codex.py`, `run_agent.py`, `agent/responses_plaintext_reasoning.py`, and corresponding tests — retain Responses reasoning needed for subsequent tool requests and classify related validation failures.

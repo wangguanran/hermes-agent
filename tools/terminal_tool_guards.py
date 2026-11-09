@@ -308,10 +308,13 @@ def gateway_lifecycle_block(
         mounted_host=getattr(env, "host_cwd", None),
         env=env,
     )
+    # Local files are already read by the guard. Retrying a missing local
+    # path via env.execute wastes a "remote read" for every non-file token.
     unsafe, refusal = scan_gateway_lifecycle(
         command,
         cwd=guard_cwd,
-        read_remote_script=lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES),
+        read_remote_script=(None if env_type == "local" else
+                            lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES)),
     )
     if unsafe and refusal:
         # Not a lifecycle command: a script the command EXECUTES could not be scanned (budget,
